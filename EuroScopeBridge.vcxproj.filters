@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Core">
+      <UniqueIdentifier>{a1f0c3d2-5e64-4b71-9c08-1d4e7a2b6f30}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="EuroScope">
+      <UniqueIdentifier>{b2e1d4c3-6f75-4c82-ad19-2e5f8b3c7a41}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Public ABI">
+      <UniqueIdentifier>{c3d2e5b4-7a86-4d93-be2a-3f6a9c4d8b52}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Registry.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\AircraftTable.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\BridgeInstance.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Log.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ApiExports.cpp">
+      <Filter>Public ABI</Filter>
+    </ClCompile>
+    <ClCompile Include="src\BridgePlugin.cpp">
+      <Filter>EuroScope</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\Registry.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\BridgeInstance.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Log.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\AircraftTable.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Version.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\BridgePlugin.h">
+      <Filter>EuroScope</Filter>
+    </ClInclude>
+    <ClInclude Include="include\esbridge.h">
+      <Filter>Public ABI</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
