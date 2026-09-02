@@ -151,6 +151,15 @@ public:
 
     bool LoadState();                    // reads the file into a staging area
     bool SaveState();                    // unconditional; ignores the debounce
+
+    // Flipped by ~BridgePlugin once the EuroScope layer has gone. The registry
+    // itself stays alive and readable, because consumers unwind after the bridge
+    // does and their unregister_provider and unsubscribe calls have to keep
+    // working. What it stops accepting is new state: SaveState has already run by
+    // then, so a late write would be dropped on the floor rather than persisted,
+    // and a late subscribe would arm a callback into a module about to unload.
+    void Shutdown() { m_shuttingDown = true; }
+    bool ShuttingDown() const { return m_shuttingDown; }
     void FlushStateIfDue(uint64_t nowMs);
     bool StateDirty() const { return m_stateDirty; }
 
@@ -283,6 +292,7 @@ private:
     std::map<std::string, StagedValue> m_staged;   // qualified name -> value
     bool     m_stateDirty      = false;
     uint64_t m_lastStateFlushMs = 0;
+    bool     m_shuttingDown    = false;
 
     void MarkStateDirty(const FieldDef& f);
     void RestoreStagedFor(uint32_t providerIndex);

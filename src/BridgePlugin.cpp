@@ -123,6 +123,12 @@ BridgePlugin::~BridgePlugin()
     // The debounce means there is almost always something not yet on disk.
     // Shutdown is the one moment it must be flushed unconditionally.
     TheRegistry().SaveState();
+
+    // The registry outlives this object: the module is pinned, so consumers that
+    // EuroScope unloads after us still find a live api table to unregister and
+    // unsubscribe against. It must not take new state past this point, though -
+    // the flush above has already happened, so a later write would just be lost.
+    TheRegistry().Shutdown();
 }
 
 // The relay publishes under the controller's position, so peers can tell whose

@@ -12,10 +12,24 @@ using esb::TheRegistry;
 
 namespace {
 
+// The one condition a forwarder tests. After ~BridgePlugin has run the registry
+// is deliberately still answering: EuroScope unloads the bridge before the
+// plugins that consume it, so their destructors call unregister_provider and
+// unsubscribe on the way out and those have to succeed. What it stops taking is
+// new state -- SaveState has already run, so a write arriving now would be lost
+// rather than persisted, and a subscription would arm a callback into a module
+// that is about to unload.
+bool AcceptingState()
+{
+    return !TheRegistry().ShuttingDown();
+}
+
 // -- registration ---------------------------------------------------------
 
 ESB_Status __cdecl Api_register_provider(const ESB_ProviderDecl* decl, ESB_Provider** out)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().RegisterProvider(decl, out);
 }
 
@@ -26,6 +40,8 @@ ESB_Status __cdecl Api_unregister_provider(ESB_Provider* p)
 
 ESB_Status __cdecl Api_own_field(ESB_Provider* p, const char* field, ESB_FieldId* out)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().OwnField(p, field, out);
 }
 
@@ -55,11 +71,15 @@ ESB_Status __cdecl Api_get_global(ESB_FieldId f, ESB_Value* out, void* buf, uint
 
 ESB_Status __cdecl Api_set_global(ESB_Provider* p, ESB_FieldId f, const ESB_Value* v)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().SetGlobal(p, f, v);
 }
 
 ESB_Status __cdecl Api_clear_global(ESB_Provider* p, ESB_FieldId f)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().ClearGlobal(p, f);
 }
 
@@ -83,11 +103,15 @@ ESB_Status __cdecl Api_get_ac(ESB_Aircraft a, ESB_FieldId f, ESB_Value* out,
 
 ESB_Status __cdecl Api_set_ac(ESB_Provider* p, ESB_Aircraft a, ESB_FieldId f, const ESB_Value* v)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().SetAircraft(p, a, f, v);
 }
 
 ESB_Status __cdecl Api_clear_ac(ESB_Provider* p, ESB_Aircraft a, ESB_FieldId f)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().ClearAircraft(p, a, f);
 }
 
@@ -106,6 +130,8 @@ uint64_t __cdecl Api_provider_revision(const char* id)
 ESB_Status __cdecl Api_subscribe(ESB_FieldId f, ESB_OnChange cb, void* user,
                                  void* module, ESB_Sub** out)
 {
+    if (!AcceptingState())
+        return ESB_E_SHUTDOWN;
     return TheRegistry().Subscribe(f, cb, user, module, out);
 }
 
@@ -203,6 +229,37 @@ const ESB_Api_v1 kApiV1 = {
     Api_last_error,
 };
 
+// Keeps this DLL mapped for the life of the process.
+//
+// Clients cache the table below for as long as they live and have no way to
+// learn when it stops being mapped: the shim attaches with GetModuleHandle and
+// holds no reference by design, and EuroScope unloads the bridge BEFORE the
+// plugins that consume it. Without this, every consumer that calls
+// unregister_provider or unsubscribe from its destructor -- which is the obvious
+// way to write one -- reads a function pointer out of freed address space and
+// takes an access violation on the way out.
+//
+// Pinning rather than a plain reference because there is no moment at which it
+// would be safe to drop one: the last consumer to unwind is by definition still
+// holding the table. The cost is that the DLL cannot be replaced without
+// restarting EuroScope, which for a shared bridge is the right trade.
+void PinSelf()
+{
+    static bool pinned = false;
+    if (pinned)
+        return;
+
+    HMODULE self = nullptr;
+    pinned = GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_PIN |
+                                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                reinterpret_cast<LPCSTR>(&kApiV1), &self) != FALSE;
+
+    if (!pinned)
+        esb::Log::Get().Write(ESB_LOG_WARN,
+                              "could not pin the bridge module; consumers that call "
+                              "the api from their destructor may fault on shutdown");
+}
+
 } // namespace
 
 // The one exported symbol clients resolve. Returning NULL for an unknown
@@ -218,6 +275,10 @@ const ESB_Api_v1* __cdecl ESB_GetApi(uint32_t abi_version)
     // documented no-bridge path, which fails visibly instead of silently.
     if (!esb::BridgeInstance::Get().Serving())
         return nullptr;
+
+    // Only once a client is actually about to hold the pointer, and only on the
+    // copy that serves: a stood-down duplicate has no business staying resident.
+    PinSelf();
 
     return &kApiV1;
 }

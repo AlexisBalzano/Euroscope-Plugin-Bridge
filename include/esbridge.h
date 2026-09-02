@@ -62,6 +62,10 @@ typedef int32_t ESB_Status;
 #define ESB_E_SCHEMA_CONFLICT   -12   /* re-register with an incompatible schema  */
 #define ESB_E_LIMIT             -13   /* quota exceeded (fields, size, rate)      */
 #define ESB_E_NO_BRIDGE         -14   /* client-shim only: bridge DLL not loaded  */
+#define ESB_E_SHUTDOWN          -15   /* bridge has shut down; state is flushed   */
+                                      /* and takes no more writes. Reads,         */
+                                      /* unregister_provider and unsubscribe keep */
+                                      /* working, so teardown still unwinds.      */
 
 /* ------------------------------------------------------------- value model */
 
