@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 #include "Config.h"
 #include "Transport.h"
@@ -64,7 +65,8 @@ private:
     bool ConnectAndSubscribe();
     void PumpOutbound();
     bool PumpInbound();
-    void HandlePublish(const std::string& topic, const std::string& payload);
+    void HandlePublish(const std::string& topic, const std::string& payload,
+                       const std::vector<std::pair<std::string, std::string>>& props);
     void SetError(const std::string& text);
 
     std::string TopicFor(const Message& m) const;

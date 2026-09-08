@@ -266,7 +266,7 @@ bool Relay::ConnectAndSubscribe()
         const std::string presenceTopic =
             "esb/v1/" + m_config.room + "/" + m_config.controller + "/@presence";
         const std::vector<uint8_t> presence =
-            mqtt::EncodePublish(presenceTopic, m_config.controller, true);
+            mqtt::EncodePublish(presenceTopic, m_config.controller, true, mqtt::Properties{});
         m_transport->Send(presence.data(), presence.size());
 
         m_connected.store(true);
@@ -293,12 +293,12 @@ void Relay::PumpOutbound()
         // Retained, because a registry value is current state: a controller
         // who connects later must receive it without waiting for the next
         // change (ARCHITECTURE.md 11.2).
-        char header[32];
-        std::snprintf(header, sizeof header, "%u:%llu:",
-                      m.type, static_cast<unsigned long long>(m.revision));
+        mqtt::Properties props;
+        props.user.push_back({ "type", std::to_string(m.type) });
+        props.user.push_back({ "rev",  std::to_string(m.revision) });
 
         const std::vector<uint8_t> packet =
-            mqtt::EncodePublish(TopicFor(m), std::string(header) + m.payload, true);
+            mqtt::EncodePublish(TopicFor(m), m.payload, true, props);
 
         if (m_transport->Send(packet.data(), packet.size()) < 0)
         {
@@ -341,7 +341,7 @@ bool Relay::PumpInbound()
         m_rx.erase(m_rx.begin(), m_rx.begin() + static_cast<ptrdiff_t>(consumed));
 
         if (packet.type == mqtt::kPublish)
-            HandlePublish(packet.topic, packet.payload);
+            HandlePublish(packet.topic, packet.payload, packet.props.user);
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -356,7 +356,8 @@ bool Relay::PumpInbound()
     return true;
 }
 
-void Relay::HandlePublish(const std::string& topic, const std::string& payload)
+void Relay::HandlePublish(const std::string& topic, const std::string& payload,
+                          const std::vector<std::pair<std::string, std::string>>& props)
 {
     std::vector<std::string> parts;
     Split(topic, parts);
@@ -399,18 +400,23 @@ void Relay::HandlePublish(const std::string& topic, const std::string& payload)
     if (parts.size() >= 7)
         m.callsign = parts[6];
 
-    // payload is "<type>:<revision>:<data>"
-    const size_t firstColon = payload.find(':');
-    if (firstColon == std::string::npos)
-        return;
-    const size_t secondColon = payload.find(':', firstColon + 1);
-    if (secondColon == std::string::npos)
-        return;
+    // Value type and revision now ride as MQTT 5.0 User Properties; the
+    // payload is the bare value.
+    std::string typeStr, revStr;
+    for (const auto& kv : props)
+    {
+        if      (kv.first == "type") typeStr = kv.second;
+        else if (kv.first == "rev")  revStr  = kv.second;
+    }
+    if (typeStr.empty() || revStr.empty())
+        return;                          // missing metadata: drop (as a malformed payload was)
 
-    m.type     = static_cast<uint32_t>(std::strtoul(payload.substr(0, firstColon).c_str(), nullptr, 10));
-    m.revision = std::strtoull(
-        payload.substr(firstColon + 1, secondColon - firstColon - 1).c_str(), nullptr, 10);
-    m.payload  = payload.substr(secondColon + 1);
+    char* end = nullptr;
+    m.type = static_cast<uint32_t>(std::strtoul(typeStr.c_str(), &end, 10));
+    if (end == typeStr.c_str() || *end != '\0') return;
+    m.revision = std::strtoull(revStr.c_str(), &end, 10);
+    if (end == revStr.c_str() || *end != '\0') return;
+    m.payload = payload;                 // payload is now the bare value
 
     {
         std::lock_guard<std::mutex> lock(m_inMutex);
