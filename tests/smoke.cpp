@@ -147,13 +147,13 @@ public:
             case esb::mqtt::kConnect:
             {
                 // CONNACK: session-present 0, return code 0.
-                const uint8_t connack[] = { 0x20, 0x02, 0x00, 0x00 };
+                const uint8_t connack[] = { 0x20, 0x03, 0x00, 0x00, 0x00 };
                 m_out.insert(m_out.end(), connack, connack + sizeof connack);
                 break;
             }
             case esb::mqtt::kSubscribe:
             {
-                const uint8_t suback[] = { 0x90, 0x03, 0x00, 0x01, 0x00 };
+                const uint8_t suback[] = { 0x90, 0x04, 0x00, 0x01, 0x00, 0x00 };
                 m_out.insert(m_out.end(), suback, suback + sizeof suback);
                 break;
             }
@@ -872,8 +872,10 @@ int main()
         }
         Check(allOk, "remaining-length varints round-trip at every boundary");
 
+        esb::mqtt::Properties props;
+        props.user = { { "type", "1" }, { "rev", "2" } };
         const std::vector<uint8_t> pub =
-            esb::mqtt::EncodePublish("esb/v1/room/CTR/prov/field", "1:2:42", true);
+            esb::mqtt::EncodePublish("esb/v1/room/CTR/prov/field", "42", true, props);
         esb::mqtt::Packet decoded;
         size_t consumed = 0;
         Check(esb::mqtt::Decode(pub.data(), pub.size(), &decoded, &consumed) ==
@@ -881,9 +883,35 @@ int main()
               "a PUBLISH round-trips");
         Check(decoded.type == esb::mqtt::kPublish, "as a PUBLISH");
         Check(decoded.topic == "esb/v1/room/CTR/prov/field", "with its topic");
-        Check(decoded.payload == "1:2:42", "and its payload");
+        Check(decoded.payload == "42", "and its bare-value payload");
         Check(decoded.retain, "and the retain flag that late joiners depend on");
         Check(consumed == pub.size(), "consuming exactly the packet");
+
+        std::string gotType, gotRev;
+        for (const auto& kv : decoded.props.user)
+        {
+            if (kv.first == "type") gotType = kv.second;
+            else if (kv.first == "rev") gotRev = kv.second;
+        }
+        Check(decoded.props.user.size() == 2 && gotType == "1" && gotRev == "2",
+              "carrying type/rev as MQTT 5.0 User Properties");
+
+        // A hand-built v5 PUBLISH with a non-user property before a User
+        // Property proves the walker skips known properties and extracts users.
+        const unsigned char v5[] = {
+            0x31, 0x14,                                    // PUBLISH+retain, remaining length 20
+            0x00, 0x03, 'a','/','b',                       // topic "a/b"
+            0x0C,                                          // property length 12
+            0x01, 0x01,                                    // Payload Format Indicator = 1
+            0x26, 0x00,0x04,'t','y','p','e', 0x00,0x01,'1',// User Property type=1
+            'h','i'                                        // payload
+        };
+        esb::mqtt::Packet pw; size_t usedw = 0;
+        Check(esb::mqtt::Decode(v5, sizeof v5, &pw, &usedw) == esb::mqtt::DecodeResult::Ok &&
+              pw.topic == "a/b" && pw.payload == "hi" && pw.retain &&
+              pw.props.user.size() == 1 && pw.props.user[0].first == "type" &&
+              pw.props.user[0].second == "1",
+              "a v5 PUBLISH decodes past a non-user property and extracts a User Property");
 
         // A partial packet must ask for more, never guess.
         esb::mqtt::Packet partial;
@@ -973,13 +1001,16 @@ int main()
     std::printf("\ninbound is validated, and stays in the remote view\n");
 
     // Feed a peer's PUBLISH in through the transport, exactly as a broker would.
-    auto deliverRemote = [&](const char* topic, const char* payload) {
-        broker->Deliver(esb::mqtt::EncodePublish(topic, payload, true));
+    auto deliverRemote = [&](const char* topic, uint32_t type, uint64_t rev, const char* value) {
+        esb::mqtt::Properties props;
+        props.user.push_back({ "type", std::to_string(type) });
+        props.user.push_back({ "rev",  std::to_string(rev) });
+        broker->Deliver(esb::mqtt::EncodePublish(topic, value, true, props));
         Sleep(80);
         reg.DrainRelay(3000000);
     };
 
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", "1:7:555");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", 1, 7, "555");
 
     ESB_Origin origins[4];
     uint32_t n = 4;
@@ -1011,11 +1042,11 @@ int main()
     std::printf("\ninbound from an untrusted peer is rejected on every axis\n");
 
     const uint64_t before = relay.Rejected();
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/private", "1:8:1");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/private", 1, 8, "1");
     Check(relay.Rejected() > before, "a field its author never flagged syncable is rejected");
 
     const uint64_t beforeType = relay.Rejected();
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", "4:9:hello");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", 4, 9, "hello");
     Check(relay.Rejected() > beforeType, "a type that disagrees with our schema is rejected");
     CheckStatus(api->get_remote(shared, ESB_AIRCRAFT_NONE, "EDDF_TWR",
                                 &remoteVal, nullptr, nullptr), ESB_OK,
@@ -1023,17 +1054,17 @@ int main()
     Check(remoteVal.v.i64 == 555, "unmodified");
 
     const uint64_t beforeUnknown = relay.Rejected();
-    deliverRemote("esb/v1/testroom/EDDF_TWR/nosuch/field", "1:1:1");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/nosuch/field", 1, 1, "1");
     Check(relay.Rejected() > beforeUnknown, "an unknown provider is rejected");
 
     const uint64_t beforeGarbage = relay.Rejected();
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", "1:10:notanumber");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/shared", 1, 10, "notanumber");
     Check(relay.Rejected() > beforeGarbage, "a payload that does not parse is rejected");
 
     std::printf("\nremote values follow the aircraft generation\n");
 
     reg.ObserveAircraft("SAS55", 3000000);
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/ac/SAS55", "1:3:88");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/ac/SAS55", 1, 3, "88");
 
     ESB_Aircraft sas = ESB_AIRCRAFT_NONE;
     CheckStatus(api->aircraft("SAS55", &sas), ESB_OK, "the aircraft resolves");
@@ -1053,7 +1084,7 @@ int main()
 
     std::printf("\nvalues arriving before the aircraft does\n");
 
-    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/ac/QTR99", "1:4:123");
+    deliverRemote("esb/v1/testroom/EDDF_TWR/syncer/ac/QTR99", 1, 4, "123");
     ESB_Aircraft qtr = ESB_AIRCRAFT_NONE;
     Check(api->aircraft("QTR99", &qtr) == ESB_E_UNKNOWN_AIRCRAFT,
           "EuroScope has not shown us the aircraft yet");
