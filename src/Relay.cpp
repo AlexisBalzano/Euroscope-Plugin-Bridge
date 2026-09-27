@@ -180,6 +180,87 @@ void Relay::ThreadMain()
     m_connected.store(false);
 }
 
+// MQTT 5.0 SUBACK reason codes: 0x00-0x02 are "granted, at this QoS";
+// anything from 0x80 up is a refusal. 0x87 (not authorized) is the one a
+// credentialed broker with topic ACLs will actually send.
+static const char* SubAckReason(uint8_t code)
+{
+    switch (code)
+    {
+    case 0x00: case 0x01: case 0x02: return nullptr;   // granted
+    case 0x80: return "unspecified error";
+    case 0x83: return "implementation specific error";
+    case 0x87: return "not authorized -- the broker ACL does not grant this topic filter";
+    case 0x8F: return "topic filter invalid";
+    case 0x91: return "packet identifier in use";
+    case 0x97: return "quota exceeded";
+    case 0x9E: return "shared subscriptions not supported";
+    case 0xA1: return "subscription identifiers not supported";
+    case 0xA2: return "wildcard subscriptions not supported";
+    default:   return "refused";
+    }
+}
+
+bool Relay::AwaitSubAck(const std::string& filter)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
+    while (std::chrono::steady_clock::now() < deadline && !m_stop.load())
+    {
+        uint8_t chunk[2048];
+        const int got = m_transport->Recv(chunk, sizeof chunk);
+        if (got < 0)
+        {
+            SetError("connection closed before SUBACK");
+            return false;
+        }
+        if (got > 0)
+            m_rx.insert(m_rx.end(), chunk, chunk + got);
+
+        for (;;)
+        {
+            mqtt::Packet packet;
+            size_t consumed = 0;
+            const mqtt::DecodeResult r =
+                mqtt::Decode(m_rx.data(), m_rx.size(), &packet, &consumed);
+
+            if (r == mqtt::DecodeResult::NeedMore)
+                break;
+            if (r == mqtt::DecodeResult::Malformed)
+            {
+                SetError("malformed reply to SUBSCRIBE");
+                return false;
+            }
+
+            m_rx.erase(m_rx.begin(), m_rx.begin() + static_cast<ptrdiff_t>(consumed));
+
+            // A broker may start delivering retained messages for the filter
+            // before its SUBACK lands. Keep them rather than dropping them.
+            if (packet.type == mqtt::kPublish)
+            {
+                HandlePublish(packet.topic, packet.payload, packet.props.user);
+                continue;
+            }
+            if (packet.type != mqtt::kSubAck)
+                continue;
+
+            const char* why = SubAckReason(packet.returnCode);
+            if (!why)
+                return true;
+
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "broker refused the subscription to '%s': %s (code 0x%02X)",
+                          filter.c_str(), why, static_cast<unsigned>(packet.returnCode));
+            SetError(buf);
+            return false;
+        }
+    }
+
+    SetError("timed out waiting for SUBACK");
+    return false;
+}
+
 bool Relay::ConnectAndSubscribe()
 {
     if (!m_transport)
@@ -259,6 +340,17 @@ bool Relay::ConnectAndSubscribe()
         if (m_transport->Send(sub.data(), sub.size()) < 0)
         {
             SetError("could not send SUBSCRIBE");
+            m_transport->Close();
+            return false;
+        }
+
+        // The SUBACK must be checked, not assumed. A broker whose ACL does not
+        // grant this topic filter accepts the CONNECT, accepts every PUBLISH,
+        // and simply never delivers anything -- so without this the relay would
+        // report "connected", sync outbound fine, and receive nothing at all
+        // with no error anywhere to explain it.
+        if (!AwaitSubAck(filter))
+        {
             m_transport->Close();
             return false;
         }

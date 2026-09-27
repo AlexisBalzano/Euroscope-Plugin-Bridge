@@ -153,7 +153,9 @@ public:
             }
             case esb::mqtt::kSubscribe:
             {
-                const uint8_t suback[] = { 0x90, 0x04, 0x00, 0x01, 0x00, 0x00 };
+                // Reason code 0x00 = granted QoS 0. m_subAckReason lets a test
+                // make the broker refuse, which is what an ACL actually does.
+                const uint8_t suback[] = { 0x90, 0x04, 0x00, 0x01, 0x00, m_subAckReason };
                 m_out.insert(m_out.end(), suback, suback + sizeof suback);
                 break;
             }
@@ -212,6 +214,10 @@ private:
     std::vector<uint8_t> m_out;       // broker -> client
     std::string          m_publishedTopics;
     bool                 m_connected = false;
+
+public:
+    // 0x87 == not authorized, the code a broker with topic ACLs sends.
+    uint8_t m_subAckReason = 0x00;
 };
 
 int main()
@@ -1097,6 +1103,33 @@ int main()
     Check(n == 1, "and the held value is applied (a TOBT can beat the flight plan)");
 
     relay.Stop();
+
+    std::printf("\na refused subscription is reported, not silent\n");
+    {
+        // The failure this exists to catch: a broker whose ACL does not grant
+        // the topic filter accepts CONNECT and every PUBLISH, then delivers
+        // nothing. Before the SUBACK check the relay called that "connected".
+        esb::Relay denied;
+        auto ownedDenied = std::unique_ptr<FakeBroker>(new FakeBroker());
+        FakeBroker* deniedBroker = ownedDenied.get();
+        deniedBroker->m_subAckReason = 0x87;          // not authorized
+
+        denied.Start(relayConfig, std::move(ownedDenied));
+        for (int i = 0; i < 60 && denied.LastError().empty(); ++i)
+            Sleep(20);
+
+        Check(!denied.Connected(),
+              "the relay does NOT report connected when the subscription is refused");
+        const std::string err = denied.LastError();
+        Check(err.find("refused the subscription") != std::string::npos,
+              "and says the subscription was refused");
+        Check(err.find("not authorized") != std::string::npos,
+              "naming the broker ACL as the cause");
+        Check(err.find("0x87") != std::string::npos, "with the reason code to quote");
+
+        denied.Stop();
+    }
+
     reg.SetRelay(nullptr, nullptr);
     api->unregister_provider(sprov);
 

@@ -8,3 +8,11 @@ build/
 *.opensdf
 *.VC.db
 *.VC.opendb
+
+# Runtime files written beside the DLL. bridge.json holds broker credentials --
+# never commit it, and never put it in a shared sector-file or plugin bundle.
+bridge.json
+bridge-state.json
+EuroScopeBridge.log
+EuroScopeBridge.log.1
+EuroScopeBridge-dump.txt
